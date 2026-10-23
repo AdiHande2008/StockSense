@@ -29,33 +29,51 @@ def extract_features(df_prices: pd.DataFrame, include_target: bool = True) -> pd
     df["sma_20"] = df["close"].rolling(window=20).mean()
     df["sma_ratio"] = (df["sma_5"] - df["sma_20"]) / df["sma_20"]
     
-    # 3. Volatility
-    df["volatility_5d"] = df["return_1d"].rolling(window=5).std().fillna(0.0)
+    # 3. MACD (12 EMA - 26 EMA) & 9-period Signal Line
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = (ema_12 - ema_26) / df["close"]
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
     
-    # 4. Volume Ratio
+    # 4. Bollinger Bands & %B
+    rolling_std = df["close"].rolling(window=20).std()
+    upper_band = df["sma_20"] + (2 * rolling_std)
+    lower_band = df["sma_20"] - (2 * rolling_std)
+    band_width = (upper_band - lower_band).replace(0, np.nan)
+    df["bollinger_b"] = ((df["close"] - lower_band) / band_width).fillna(0.5)
+    
+    # 5. Candlestick Anatomy (Intraday Buyer/Seller Pressure)
+    hl_range = (df["high"] - df["low"]).replace(0, np.nan)
+    df["body_ratio"] = ((df["close"] - df["open"]) / hl_range).fillna(0.0)
+    
+    # 6. Volatility & Volume Ratios
+    df["volatility_5d"] = df["return_1d"].rolling(window=5).std().fillna(0.0)
     vol_sma_5 = df["volume"].rolling(window=5).mean().replace(0, np.nan)
     df["volume_ratio_5d"] = (df["volume"] / vol_sma_5).fillna(1.0)
     
-    # 5. Momentum (RSI 14)
+    # 7. Momentum (RSI 14)
     df["rsi_14"] = compute_rsi(df["close"], period=14)
     
-    # 6. Calendar feature
+    # 8. Calendar Feature
     df["trading_date_dt"] = pd.to_datetime(df["trading_date"])
     df["day_of_week"] = df["trading_date_dt"].dt.dayofweek
     
+    # Warm-up check columns
+    warmup_cols = ["sma_20", "bollinger_b", "macd_hist"]
+    
     if include_target:
         # Target: 1 if NEXT trading day's close > today's close; 0 otherwise (ties labelled 0)
-        # Note: close.shift(-1) gets tomorrow's close
         next_close = df["close"].shift(-1)
         df["target"] = (next_close > df["close"]).astype(int)
         
         # Drop rows where tomorrow's close is not known (the latest row)
-        # and drop initial warm-up period (first 20 rows where SMA 20 is NaN)
-        df_valid = df.dropna(subset=["sma_20"]).iloc[:-1].copy()
+        # and drop initial warm-up period
+        df_valid = df.dropna(subset=warmup_cols).iloc[:-1].copy()
         return df_valid
     else:
         # For inference: keep the latest row
-        df_valid = df.dropna(subset=["sma_20"]).copy()
+        df_valid = df.dropna(subset=warmup_cols).copy()
         return df_valid
 
 FEATURE_COLUMNS = [
@@ -63,6 +81,9 @@ FEATURE_COLUMNS = [
     "return_2d",
     "return_5d",
     "sma_ratio",
+    "macd_hist",
+    "bollinger_b",
+    "body_ratio",
     "volatility_5d",
     "volume_ratio_5d",
     "rsi_14",

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier, VotingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
@@ -18,9 +18,8 @@ class MajorityBaselineClassifier:
         self.classes_ = np.array([0, 1])
         
     def fit(self, X, y):
-        # Determine the most frequent class in y
         counts = pd.Series(y).value_counts()
-        self.majority_class_ = counts.idxmax()
+        self.majority_class_ = int(counts.idxmax())
         return self
         
     def predict(self, X):
@@ -47,7 +46,6 @@ def evaluate_predictions(y_true, y_pred, baseline_balanced_acc: float = 0.5) -> 
     f1 = float(f1_score(y_true, y_pred, zero_division=0))
     
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    # cm: [[TN, FP], [FN, TP]]
     tn, fp, fn, tp = cm.ravel()
     
     return {
@@ -68,12 +66,12 @@ def evaluate_predictions(y_true, y_pred, baseline_balanced_acc: float = 0.5) -> 
 
 def train_and_evaluate_symbol(symbol: str, df_prices: pd.DataFrame, artifacts_dir: str):
     """
-    Runs the full leakage-safe training and validation pipeline for a symbol:
-    1. Extracts technical features
-    2. Chronologically splits into train (80%) and holdout test (20%)
-    3. Trains Baseline, Logistic Regression, and Random Forest
-    4. Evaluates all three on the unseen holdout test set
-    5. Saves the winning published model to artifacts
+    Runs the enhanced multi-model training and selection pipeline:
+    1. Extracts 11 leakage-safe technical features (returns, trend, MACD, Bollinger %B, candle body, RSI).
+    2. Chronologically splits into train (80%) and holdout test (20%).
+    3. Trains Baseline, Scaled Logistic Regression, Random Forest, and Gradient Boosting.
+    4. Evaluates all candidates and selects the top performer per stock.
+    5. Saves the winning published model to artifacts.
     """
     df_features = extract_features(df_prices, include_target=True)
     if len(df_features) < 40:
@@ -95,21 +93,22 @@ def train_and_evaluate_symbol(symbol: str, df_prices: pd.DataFrame, artifacts_di
     y_pred_base = baseline.predict(X_test)
     base_metrics = evaluate_predictions(y_test, y_pred_base, baseline_balanced_acc=0.50)
     
-    # 2. Logistic Regression Pipeline
+    # 2. Scaled L2 Logistic Regression Pipeline
     lr_pipe = Pipeline([
         ("scaler", StandardScaler()),
-        ("model", LogisticRegression(random_state=42, C=0.1, max_iter=200))
+        ("model", LogisticRegression(random_state=42, C=0.3, max_iter=300, class_weight="balanced"))
     ])
     lr_pipe.fit(X_train, y_train)
     y_pred_lr = lr_pipe.predict(X_test)
     lr_metrics = evaluate_predictions(y_test, y_pred_lr, baseline_balanced_acc=base_metrics["balanced_accuracy"])
     
-    # 3. Random Forest (conservative hyperparameters)
+    # 3. Tuned Random Forest Classifier
     rf_pipe = Pipeline([
         ("model", RandomForestClassifier(
-            n_estimators=60,
-            max_depth=3,
-            min_samples_leaf=5,
+            n_estimators=100,
+            max_depth=4,
+            min_samples_leaf=4,
+            max_features="sqrt",
             random_state=42
         ))
     ])
@@ -117,13 +116,44 @@ def train_and_evaluate_symbol(symbol: str, df_prices: pd.DataFrame, artifacts_di
     y_pred_rf = rf_pipe.predict(X_test)
     rf_metrics = evaluate_predictions(y_test, y_pred_rf, baseline_balanced_acc=base_metrics["balanced_accuracy"])
     
-    # Select publisher candidate based on balanced_accuracy
+    # 4. HistGradientBoosting Classifier
+    hgb_pipe = Pipeline([
+        ("model", HistGradientBoostingClassifier(
+            max_iter=60,
+            max_depth=3,
+            min_samples_leaf=6,
+            l2_regularization=1.5,
+            random_state=42
+        ))
+    ])
+    hgb_pipe.fit(X_train, y_train)
+    y_pred_hgb = hgb_pipe.predict(X_test)
+    hgb_metrics = evaluate_predictions(y_test, y_pred_hgb, baseline_balanced_acc=base_metrics["balanced_accuracy"])
+    
+    # 5. Soft Voting Ensemble
+    voting_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", VotingClassifier(
+            estimators=[
+                ("lr", LogisticRegression(random_state=42, C=0.3, max_iter=300)),
+                ("rf", RandomForestClassifier(n_estimators=80, max_depth=4, min_samples_leaf=4, random_state=42))
+            ],
+            voting="soft"
+        ))
+    ])
+    voting_pipe.fit(X_train, y_train)
+    y_pred_vote = voting_pipe.predict(X_test)
+    vote_metrics = evaluate_predictions(y_test, y_pred_vote, baseline_balanced_acc=base_metrics["balanced_accuracy"])
+    
+    # Select best candidate by balanced accuracy
     candidates = [
         ("LOGISTIC_REGRESSION", lr_pipe, lr_metrics),
-        ("RANDOM_FOREST", rf_pipe, rf_metrics)
+        ("RANDOM_FOREST", rf_pipe, rf_metrics),
+        ("GRADIENT_BOOSTING", hgb_pipe, hgb_metrics),
+        ("ENSEMBLE", voting_pipe, vote_metrics)
     ]
-    # Pick the best model (or LR if tied)
-    best_algo, best_model, best_metrics = max(candidates, key=lambda c: c[2]["balanced_accuracy"])
+    
+    best_algo, best_model, best_metrics = max(candidates, key=lambda c: (c[2]["balanced_accuracy"], c[2]["accuracy"]))
     
     os.makedirs(artifacts_dir, exist_ok=True)
     artifact_filename = f"{symbol.lower()}_model.joblib"

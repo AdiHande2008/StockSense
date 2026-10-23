@@ -29,6 +29,8 @@ interface PredictionData {
     sma_ratio_pct: number;
     volatility_5d_pct: number;
     volume_ratio_5d: number;
+    macd_hist?: number;
+    bollinger_b?: number;
   };
 }
 
@@ -786,33 +788,37 @@ export default function Home() {
                 <p className="mt-1 text-lg font-bold text-[#F1F5FF]">
                   {prediction?.features_summary?.rsi_14 ?? 53.4}
                 </p>
-                <span className="text-[10px] text-[#9AA4C7]">Neutral</span>
+                <span className="text-[10px] text-[#9AA4C7]">Momentum</span>
               </div>
 
               <div className="bg-[#1E2540] border border-[#2A3353] rounded-xl p-3">
-                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">SMA 5/20</span>
+                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">MACD Hist</span>
+                <p className="mt-1 text-lg font-bold text-[#6EE7C2]">
+                  {prediction?.features_summary?.macd_hist !== undefined
+                    ? `${prediction.features_summary.macd_hist > 0 ? "+" : ""}${prediction.features_summary.macd_hist}`
+                    : "+0.0024"}
+                </p>
+                <span className="text-[10px] text-[#9AA4C7]">Convergence</span>
+              </div>
+
+              <div className="bg-[#1E2540] border border-[#2A3353] rounded-xl p-3">
+                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">Bollinger %B</span>
+                <p className="mt-1 text-lg font-bold text-[#F1F5FF]">
+                  {prediction?.features_summary?.bollinger_b !== undefined
+                    ? `${(prediction.features_summary.bollinger_b * 100).toFixed(0)}%`
+                    : "62%"}
+                </p>
+                <span className="text-[10px] text-[#9AA4C7]">Band Position</span>
+              </div>
+
+              <div className="bg-[#1E2540] border border-[#2A3353] rounded-xl p-3">
+                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">SMA Trend</span>
                 <p className="mt-1 text-lg font-bold text-[#F1F5FF]">
                   {prediction?.features_summary?.sma_ratio_pct !== undefined
                     ? `${prediction.features_summary.sma_ratio_pct > 0 ? "+" : ""}${prediction.features_summary.sma_ratio_pct}%`
                     : "+1.2%"}
                 </p>
-                <span className="text-[10px] text-[#9AA4C7]">Trend Gap</span>
-              </div>
-
-              <div className="bg-[#1E2540] border border-[#2A3353] rounded-xl p-3">
-                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">Volatility</span>
-                <p className="mt-1 text-lg font-bold text-[#F1F5FF]">
-                  {prediction?.features_summary?.volatility_5d_pct ?? 1.42}%
-                </p>
-                <span className="text-[10px] text-[#9AA4C7]">5d Return Std</span>
-              </div>
-
-              <div className="bg-[#1E2540] border border-[#2A3353] rounded-xl p-3">
-                <span className="text-[10px] text-[#9AA4C7] uppercase font-semibold">Volume</span>
-                <p className="mt-1 text-lg font-bold text-[#F1F5FF]">
-                  {prediction?.features_summary?.volume_ratio_5d ?? 1.15}x
-                </p>
-                <span className="text-[10px] text-[#9AA4C7]">vs 5d Average</span>
+                <span className="text-[10px] text-[#9AA4C7]">SMA 5 / 20</span>
               </div>
             </div>
           </div>

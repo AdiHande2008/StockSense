@@ -40,6 +40,8 @@ def predict_latest_direction(symbol: str, df_prices: pd.DataFrame, artifact_path
         "sma_ratio_pct": round(float(latest_row["sma_ratio"]) * 100, 2),
         "volatility_5d_pct": round(float(latest_row["volatility_5d"]) * 100, 2),
         "volume_ratio_5d": round(float(latest_row["volume_ratio_5d"]), 2),
+        "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
+        "bollinger_b": round(float(latest_row.get("bollinger_b", 0.5)), 2),
     }
     
     return {

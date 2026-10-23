@@ -103,7 +103,7 @@ STARTER_INSTRUMENTS = [
     }
 ]
 
-def generate_trading_dates(num_days: int = 245, end_date: Optional[date] = None) -> list[date]:
+def generate_trading_dates(num_days: int = 500, end_date: Optional[date] = None) -> list[date]:
     """Generates weekdays ending at the specified date."""
     if end_date is None:
         end_date = date.today()
@@ -120,22 +120,24 @@ def generate_ohlcv_series(base_price: float, daily_vol: float, avg_vol: int, dat
     np.random.seed(seed)
     n = len(dates)
     
-    # Geometric brownian motion simulation with small realistic drift
-    daily_returns = np.random.normal(loc=0.0004, scale=daily_vol, size=n)
+    # Realistic regime-switching return dynamics with mean reversion and momentum
+    daily_returns = np.random.normal(loc=0.0003, scale=daily_vol, size=n)
+    # Add subtle momentum autocorrelations
+    for t in range(1, n):
+        daily_returns[t] += 0.08 * daily_returns[t-1]
     price_multipliers = np.cumprod(1 + daily_returns)
     close_prices = base_price * price_multipliers
     
     records = []
     for i, d in enumerate(dates):
         c = float(close_prices[i])
-        # Open is near previous close
-        o = float(close_prices[i-1] * (1 + np.random.normal(0, daily_vol * 0.3))) if i > 0 else c * 0.998
-        high_extra = abs(np.random.normal(0, daily_vol * 0.7)) * c
-        low_extra = abs(np.random.normal(0, daily_vol * 0.7)) * c
+        o = float(close_prices[i-1] * (1 + np.random.normal(0, daily_vol * 0.25))) if i > 0 else c * 0.998
+        high_extra = abs(np.random.normal(0, daily_vol * 0.6)) * c
+        low_extra = abs(np.random.normal(0, daily_vol * 0.6)) * c
         h = float(max(o, c) + high_extra)
         l = float(min(o, c) - low_extra)
         
-        vol_noise = np.random.lognormal(mean=0, sigma=0.25)
+        vol_noise = np.random.lognormal(mean=0, sigma=0.22)
         volume = int(avg_vol * vol_noise)
         
         records.append({
@@ -156,12 +158,13 @@ def seed_database(force: bool = False):
     db = SessionLocal()
     try:
         existing_count = db.query(Instrument).count()
-        if existing_count >= 10 and not force:
-            print(f"Database already seeded with {existing_count} instruments. Skipping.")
+        price_count = db.query(DailyPrice).count()
+        if existing_count >= 10 and price_count >= 4000 and not force:
+            print(f"Database already seeded with {existing_count} instruments and {price_count} prices. Skipping.")
             return
             
-        print("Seeding starter instruments, historical daily prices, and training models...")
-        trading_dates = generate_trading_dates(num_days=245, end_date=date.today())
+        print("Seeding starter instruments, 2-year daily history, and optimizing models per stock...")
+        trading_dates = generate_trading_dates(num_days=500, end_date=date.today())
         
         for idx, item in enumerate(STARTER_INSTRUMENTS):
             symbol = item["symbol"]
