@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 
 // Types matching API contract
 interface Instrument {
@@ -59,7 +59,7 @@ interface PricePoint {
   volume: number;
 }
 
-// Curated starter universe matching the reference data
+// Curated starter universe
 const INITIAL_INSTRUMENTS: Instrument[] = [
   { symbol: "BHARTIARTL", exchange: "NSE", provider_symbol: "BHARTIARTL.NSE", display_name: "Bharti Airtel Ltd.", sector: "Telecommunications", currency: "INR", latest_close: 1116.20, change_pct: 0.53, latest_date: "2026-10-23" },
   { symbol: "HDFCBANK", exchange: "NSE", provider_symbol: "HDFCBANK.NSE", display_name: "HDFC Bank Ltd.", sector: "Banking & Financial Services", currency: "INR", latest_close: 2211.86, change_pct: -1.55, latest_date: "2026-10-23" },
@@ -73,6 +73,45 @@ const INITIAL_INSTRUMENTS: Instrument[] = [
   { symbol: "TATAMOTORS", exchange: "NSE", provider_symbol: "TATAMOTORS.NSE", display_name: "Tata Motors Ltd.", sector: "Automotive", currency: "INR", latest_close: 972.40, change_pct: 1.45, latest_date: "2026-10-23" },
 ];
 
+// Helper to pre-generate a master 1-year historical dataset for each symbol
+function createOneYearHistory(symbol: string, basePrice: number): PricePoint[] {
+  const points: PricePoint[] = [];
+  const totalDays = 245;
+  const endDate = new Date("2026-10-23");
+  
+  // Deterministic seed based on symbol
+  let currentPrice = basePrice * 0.88;
+  const seed = symbol.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
+
+  for (let i = 0; i < totalDays; i++) {
+    const curDate = new Date(endDate.getTime() - (totalDays - 1 - i) * 86400000);
+    // Skip weekends roughly
+    const dayOfWeek = curDate.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+
+    const progress = i / totalDays;
+    const wave = Math.sin((progress * 4 + (seed % 5)) * Math.PI) * 0.012;
+    const randomDrift = Math.sin((i * 13 + seed) % 17) * 0.009;
+    currentPrice = currentPrice * (1 + wave + randomDrift);
+
+    // Final price locks to current basePrice
+    if (i === totalDays - 1) {
+      currentPrice = basePrice;
+    }
+
+    const c = Math.round(currentPrice * 100) / 100;
+    points.push({
+      date: curDate.toISOString().split("T")[0],
+      close: c,
+      high: Math.round(c * 1.012 * 100) / 100,
+      low: Math.round(c * 0.988 * 100) / 100,
+      open: Math.round(c * 0.996 * 100) / 100,
+      volume: 3000000 + Math.floor(Math.abs(Math.sin(i)) * 2500000),
+    });
+  }
+  return points;
+}
+
 export default function Home() {
   const [instruments, setInstruments] = useState<Instrument[]>(INITIAL_INSTRUMENTS);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BHARTIARTL");
@@ -82,9 +121,19 @@ export default function Home() {
   const [chartRange, setChartRange] = useState<string>("3M");
   const [backendOnline, setBackendOnline] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [hoveredPoint, setHoveredPoint] = useState<PricePoint | null>(null);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+  // Pre-generate master 1-year historical cache for instant offline fallback
+  const masterHistories = useMemo(() => {
+    const map: Record<string, PricePoint[]> = {};
+    for (const inst of INITIAL_INSTRUMENTS) {
+      map[inst.symbol] = createOneYearHistory(inst.symbol, inst.latest_close);
+    }
+    return map;
+  }, []);
 
   // Check backend health & fetch instruments
   useEffect(() => {
@@ -112,10 +161,10 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [API_URL]);
 
-  // Load prediction & price history for selected stock
+  // Load prediction & price history for selected stock and range
   useEffect(() => {
     async function loadStockDetails() {
-      const rangeParam = chartRange.toLowerCase();
+      const rangeParam = chartRange.toLowerCase(); // 1m, 3m, 6m, 1y
       if (backendOnline) {
         try {
           // Fetch prediction
@@ -126,43 +175,48 @@ export default function Home() {
             setEvaluation(data.evaluation);
           }
 
-          // Fetch prices
+          // Fetch prices for this exact range
           const priceRes = await fetch(`${API_URL}/api/v1/instruments/NSE/${selectedSymbol}/prices?range=${rangeParam}`);
           if (priceRes.ok) {
             const priceData = await priceRes.json();
             if (priceData.prices && priceData.prices.length > 0) {
               setPrices(priceData.prices);
+              setHoveredIndex(null);
               return;
             }
           }
-          generateFallbackDetails(selectedSymbol, chartRange);
         } catch {
-          generateFallbackDetails(selectedSymbol, chartRange);
+          // Fall back to local slice
         }
-      } else {
-        generateFallbackDetails(selectedSymbol, chartRange);
       }
+
+      // Offline fallback: slice master history according to range
+      applyFallbackSlice(selectedSymbol, chartRange);
     }
+
     loadStockDetails();
   }, [selectedSymbol, chartRange, backendOnline, API_URL]);
 
-  // High-fidelity fallback details matching the reference dashboard
-  function generateFallbackDetails(symbol: string, range: string) {
+  // Slices master history to provide visible differences between 1M, 3M, 6M, 1Y
+  const applyFallbackSlice = useCallback((symbol: string, range: string) => {
+    const fullHistory = masterHistories[symbol] || createOneYearHistory(symbol, 1000);
     const inst = instruments.find((i) => i.symbol === symbol) || instruments[0];
     const isBharti = symbol === "BHARTIARTL";
     
-    // For Bharti Airtel, match exact reference: DOWN with 65% confidence
-    const isDown = isBharti ? true : inst.change_pct < 0;
-    const direction: "UP" | "DOWN" = isDown ? "DOWN" : "UP";
-    const confidence = isBharti ? 0.65 : 0.58;
+    // Slice lengths: 1M ~ 23 days, 3M ~ 65 days, 6M ~ 130 days, 1Y ~ 245 days
+    const sliceCount = range === "1M" ? 23 : range === "3M" ? 65 : range === "6M" ? 130 : fullHistory.length;
+    const sliced = fullHistory.slice(-sliceCount);
+    setPrices(sliced);
+    setHoveredIndex(null);
 
+    const isDown = isBharti ? true : inst.change_pct < 0;
     setPrediction({
-      direction,
+      direction: isDown ? "DOWN" : "UP",
       as_of_date: "2026-10-23",
       target_date: "2026-10-26",
       model_label: isBharti ? "Random Forest" : "Logistic Regression",
       model_version: `${symbol.toLowerCase()}-v1.0`,
-      score: confidence,
+      score: isBharti ? 0.65 : 0.58,
       features_summary: {
         return_1d_pct: inst.change_pct,
         return_5d_pct: 1.84,
@@ -190,35 +244,7 @@ export default function Home() {
         false_negatives: 11,
       },
     });
-
-    // Generate natural curve reflecting the reference image
-    const days = range === "1M" ? 22 : range === "3M" ? 64 : range === "6M" ? 128 : 245;
-    const base = inst.latest_close;
-    const series: PricePoint[] = [];
-
-    // Reference dates for 3M span approx Jul 26 to Oct 23
-    const endDate = new Date("2026-10-23");
-    
-    for (let i = 0; i < days; i++) {
-      const curDate = new Date(endDate.getTime() - (days - 1 - i) * 86400000);
-      const progress = i / days;
-      
-      // Wave shape similar to the Bharti Airtel reference chart
-      const wave = Math.sin(progress * Math.PI * 2.8) * 0.08 - Math.cos(progress * Math.PI * 1.5) * 0.05;
-      const noise = (Math.sin(i * 1.7) * 0.015);
-      const closePrice = Math.round(base * (1 + wave + noise) * 100) / 100;
-
-      series.push({
-        date: curDate.toISOString().split("T")[0],
-        close: i === days - 1 ? base : closePrice,
-        high: Math.round(closePrice * 1.01 * 100) / 100,
-        low: Math.round(closePrice * 0.99 * 100) / 100,
-        open: Math.round(closePrice * 0.998 * 100) / 100,
-        volume: 3800000 + Math.floor(Math.random() * 1500000),
-      });
-    }
-    setPrices(series);
-  }
+  }, [masterHistories, instruments]);
 
   // Filtered stocks based on search query
   const filteredInstruments = useMemo(() => {
@@ -235,17 +261,16 @@ export default function Home() {
 
   const selectedInst = instruments.find((i) => i.symbol === selectedSymbol) || instruments[0];
 
-  // SVG Chart Computations matching reference appearance
+  // SVG Chart Computations dynamically scaled to currently selected range
   const chartMetrics = useMemo(() => {
     if (!prices || prices.length === 0) return null;
     const closes = prices.map((p) => p.close);
     const minVal = Math.min(...closes);
     const maxVal = Math.max(...closes);
 
-    // Nice rounded Y ticks
-    const tickStep = (maxVal - minVal) / 4 || 50;
-    const yMin = Math.floor(minVal / 50) * 50;
-    const yMax = Math.ceil(maxVal / 50) * 50;
+    const padding = (maxVal - minVal) * 0.1 || 10;
+    const yMin = Math.floor((minVal - padding) / 10) * 10;
+    const yMax = Math.ceil((maxVal + padding) / 10) * 10;
     const yRange = yMax - yMin || 1;
 
     const yTicks = [
@@ -285,9 +310,27 @@ export default function Home() {
     return { minVal, maxVal, yMin, yMax, yTicks, width, height, points, pathData, areaPath, xTicks };
   }, [prices]);
 
+  // Smooth mouse tracking across the entire chart area
+  const handleChartMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current || !chartMetrics || chartMetrics.points.length === 0) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const fraction = Math.max(0, Math.min(1, mouseX / rect.width));
+    const idx = Math.min(
+      chartMetrics.points.length - 1,
+      Math.max(0, Math.round(fraction * (chartMetrics.points.length - 1)))
+    );
+    setHoveredIndex(idx);
+  };
+
+  const handleChartMouseLeave = () => {
+    setHoveredIndex(null);
+  };
+
+  const activePoint = hoveredIndex !== null && chartMetrics ? chartMetrics.points[hoveredIndex] : null;
+
   // Mini sparkline generator for stock cards
   const renderSparkline = (isPositive: boolean) => {
-    // Clean, natural zigzag path matching reference
     const points = isPositive
       ? "0,18 10,14 20,16 30,11 40,15 50,7 60,11"
       : "0,7 10,10 20,6 30,14 40,12 50,18 60,15";
@@ -508,11 +551,15 @@ export default function Home() {
 
                 {/* Subtitle & Time Range Controls */}
                 <div className="mt-5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#2A3353]/70 pb-3">
-                  <div className="text-xs text-[#9AA4C7]">
-                    {hoveredPoint ? (
-                      <span>
-                        <strong className="text-[#F1F5FF]">₹{hoveredPoint.close.toLocaleString("en-IN")}</strong> on{" "}
-                        {hoveredPoint.date}
+                  <div className="text-xs text-[#9AA4C7] transition-all">
+                    {activePoint ? (
+                      <span className="inline-flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-[#6EE7C2] animate-pulse" />
+                        <span className="text-[#9AA4C7]">Inspected Close:</span>
+                        <strong className="text-[#6EE7C2] font-mono text-sm">
+                          ₹{activePoint.price.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <span className="text-[#9AA4C7] font-mono">({activePoint.date})</span>
                       </span>
                     ) : (
                       <span>Daily End-of-Day Close · Hover over curve to inspect</span>
@@ -525,10 +572,10 @@ export default function Home() {
                       <button
                         key={r}
                         onClick={() => setChartRange(r)}
-                        className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                        className={`px-2.5 py-1 text-xs rounded-md transition-all cursor-pointer ${
                           chartRange === r
-                            ? "bg-[#1E2540] text-[#6EE7C2] border border-[#6EE7C2]/30 font-semibold"
-                            : "text-[#9AA4C7] hover:text-[#F1F5FF]"
+                            ? "bg-[#1E2540] text-[#6EE7C2] border border-[#6EE7C2]/30 font-semibold shadow-xs"
+                            : "text-[#9AA4C7] hover:text-[#F1F5FF] hover:bg-[#1E2540]/40"
                         }`}
                       >
                         {r}
@@ -551,14 +598,16 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Main SVG Area */}
-                  <div className="relative flex-1 h-full w-full overflow-hidden">
+                  {/* Main SVG Area with Full Interactive Hover Tracking */}
+                  <div className="relative flex-1 h-full w-full overflow-hidden cursor-crosshair">
                     {chartMetrics ? (
                       <svg
+                        ref={svgRef}
                         viewBox={`0 0 ${chartMetrics.width} ${chartMetrics.height}`}
                         className="h-full w-full overflow-visible"
                         preserveAspectRatio="none"
-                        onMouseLeave={() => setHoveredPoint(null)}
+                        onMouseMove={handleChartMouseMove}
+                        onMouseLeave={handleChartMouseLeave}
                       >
                         <defs>
                           <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
@@ -596,26 +645,50 @@ export default function Home() {
                           strokeLinecap="round"
                         />
 
-                        {/* Hover Inspector Crosshair & Point */}
-                        {chartMetrics.points.map((pt, i) => (
-                          <circle
-                            key={i}
-                            cx={pt.x}
-                            cy={pt.y}
-                            r={hoveredPoint?.date === pt.date ? 5 : 4}
-                            className="cursor-pointer fill-[#6EE7C2] transition-opacity opacity-0 hover:opacity-100"
-                            onMouseEnter={() =>
-                              setHoveredPoint({
-                                date: pt.date,
-                                close: pt.price,
-                                high: pt.price,
-                                low: pt.price,
-                                open: pt.price,
-                                volume: 0,
-                              })
-                            }
-                          />
-                        ))}
+                        {/* Interactive Scrubbing Crosshair & Highlight Point */}
+                        {activePoint && (
+                          <g>
+                            {/* Vertical Tracking Line */}
+                            <line
+                              x1={activePoint.x}
+                              y1="0"
+                              x2={activePoint.x}
+                              y2={chartMetrics.height}
+                              stroke="#6EE7C2"
+                              strokeDasharray="3 3"
+                              strokeWidth="1.2"
+                              opacity="0.6"
+                            />
+
+                            {/* Outer Pulse Circle */}
+                            <circle
+                              cx={activePoint.x}
+                              cy={activePoint.y}
+                              r="8"
+                              fill="#6EE7C2"
+                              opacity="0.25"
+                            />
+
+                            {/* Inner Dot */}
+                            <circle
+                              cx={activePoint.x}
+                              cy={activePoint.y}
+                              r="4.5"
+                              fill="#6EE7C2"
+                              stroke="#0B0F1A"
+                              strokeWidth="2"
+                            />
+                          </g>
+                        )}
+
+                        {/* Transparent capture surface for continuous mouse events */}
+                        <rect
+                          x="0"
+                          y="0"
+                          width={chartMetrics.width}
+                          height={chartMetrics.height}
+                          fill="transparent"
+                        />
                       </svg>
                     ) : (
                       <div className="flex h-full items-center justify-center text-xs text-[#9AA4C7]">

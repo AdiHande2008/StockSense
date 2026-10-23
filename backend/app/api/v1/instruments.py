@@ -111,14 +111,18 @@ def get_price_history(
     if not inst:
         raise HTTPException(status_code=404, detail=f"Instrument {exchange}:{symbol} not found")
         
-    # Map range to days
+    # Map range to days (support both 1m/3m/6m and 1mo/3mo/6mo)
     days_map = {
+        "1m": 30,
         "1mo": 30,
+        "3m": 90,
         "3mo": 90,
+        "6m": 180,
         "6mo": 180,
-        "1y": 365
+        "1y": 365,
+        "1yr": 365,
     }
-    days = days_map.get(range.lower(), 365)
+    days = days_map.get(range.lower(), 90)
     
     # Get latest date in db
     latest_row = (
